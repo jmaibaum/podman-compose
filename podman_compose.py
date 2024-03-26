@@ -527,6 +527,53 @@ async def get_mount_args(compose, cnt, volume):
     return ["--mount", args]
 
 
+def get_config_args(compose, cnt, config):
+    config_name = config if is_str(config) else config.get("source", None)
+    if not config_name or config_name not in compose.declared_configs.keys():
+        raise ValueError(f'ERROR: undeclared config: "{config}", service: {cnt["_service"]}')
+    declared_config = compose.declared_configs[config_name]
+
+    source_file = declared_config.get("file", None)
+    dest_file = ""
+    config_opts = ""
+
+    target = None if is_str(config) else config.get("target", None)
+    uid = None if is_str(config) else config.get("uid", None)
+    gid = None if is_str(config) else config.get("gid", None)
+    mode = None if is_str(config) else config.get("mode", None)
+
+    if source_file:
+        if not target:
+            dest_file = f"/{config_name}"
+        elif not target.startswith("/"):
+            conf = target if target else config_name
+            dest_file = f"/{conf}"
+        else:
+            dest_file = target
+        basedir = compose.dirname
+        source_file = os.path.realpath(os.path.join(basedir, os.path.expanduser(source_file)))
+        volume_ref = ["--volume", f"{source_file}:{dest_file}:ro,rprivate,rbind,z"]
+        if uid or gid or mode:
+            conf = target if target else config_name
+            log.warning(
+                "WARNING: Service %s uses config %s with uid, gid, or mode."
+                + " These fields are not supported by this implementation of the Compose file\n%s",
+                cnt["_service"],
+                conf,
+                volume_ref
+            )
+        return volume_ref
+
+    # Let's get the easy way working first
+    #if declared_config.get("external", False) or declared_config.get("name", None):
+    #    config_opts += f",uid={uid}" if uid else ""
+    #    config_opts += f",gid={gid}" if gid else ""
+    #    config_opts += f",mode={mode}" if mode else ""
+
+    raise ValueError(
+        f'ERROR: Uparseable config: {config_name}, service: {cnt["_service"]}'
+    )
+
 def get_secret_args(compose, cnt, secret):
     secret_name = secret if is_str(secret) else secret.get("source", None)
     if not secret_name or secret_name not in compose.declared_secrets.keys():
@@ -932,6 +979,8 @@ async def container_to_args(compose, cnt, detached=True):
         podman_args.append(f'--log-driver={log_config.get("driver", "k8s-file")}')
         log_opts = log_config.get("options") or {}
         podman_args += [f"--log-opt={name}={value}" for name, value in log_opts.items()]
+    for config in cnt.get("configs", []):
+        podman_args.extend(get_config_args(compose, cnt, config))
     for secret in cnt.get("secrets", []):
         podman_args.extend(get_secret_args(compose, cnt, secret))
     for i in cnt.get("extra_hosts", []):
@@ -1477,6 +1526,7 @@ class PodmanCompose:
         self.vols = None
         self.networks = {}
         self.default_net = "default"
+        self.declared_configs = None
         self.declared_secrets = None
         self.container_names_by_service = None
         self.container_by_name = None
@@ -1724,7 +1774,7 @@ class PodmanCompose:
         ]
         # other top-levels:
         # networks: {driver: ...}
-        # configs: {...}
+        self.declared_configs = compose.get("configs", {})
         self.declared_secrets = compose.get("secrets", {})
         given_containers = []
         container_names_by_service = {}
